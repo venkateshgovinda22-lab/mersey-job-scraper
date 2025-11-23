@@ -3,40 +3,30 @@ name: Hourly Job Scraper
 on:
   schedule:
     - cron: '0 * * * *'  # Runs every hour at minute 0
-  workflow_dispatch:      # Allows you to trigger it manually for testing
-
-permissions:
-  contents: write         # Gives permission to commit scraped data back to the repo
+  workflow_dispatch:      # Allows manual testing
 
 jobs:
   scrape_node:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Check out the repository code
+      - name: Check out code
         uses: actions/checkout@v3
 
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '20' 
+          node-version: '20' # Updated to 20 to fix warnings
 
       - name: Install dependencies
         run: npm install
 
       - name: Run the scraper script
+        # This ENV block is the critical bridge!
         env: 
+          WEBSITE_USERNAME: ${{ secrets.WEBSITE_USERNAME }}
+          WEBSITE_PASSWORD: ${{ secrets.WEBSITE_PASSWORD }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           FIREBASE_CONFIG: ${{ secrets.FIREBASE_CONFIG }}
-          WEBSITE_USERNAME: ${{ secrets.WEBSITE_USERNAME }}
-          WEBSITE_PASSWORD: ${{ secrets.WEBSITE_PASSWORD }}
         run: node index.js
-
-      - name: Commit and Push Data
-        run: |
-          git config --global user.name 'GitHub Action'
-          git config --global user.email 'action@github.com'
-          git add -A
-          git commit -m "Auto-update job data" || exit 0
-          git push
