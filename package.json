@@ -14,7 +14,7 @@
   "license": "ISC",
   "dependencies": {
     "firebase": "^11.0.2",
-    "puppeteer": "^23.9.0",
+    "puppeteer": "latest",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "winston": "^3.17.0"
