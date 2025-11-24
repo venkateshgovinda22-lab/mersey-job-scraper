@@ -1,0 +1,26 @@
+name: Generate & Commit Lockfile
+
+on:
+  workflow_dispatch: # Allows manual running
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      # This runs npm install to generate package-lock.json
+      - name: Generate Lock File
+        run: npm install
+
+      # This commits the generated file back to the repository
+      - name: Commit package-lock.json
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "CI: Generated fresh package-lock.json for npm ci"
