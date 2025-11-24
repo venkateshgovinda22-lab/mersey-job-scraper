@@ -1,36 +1,35 @@
 /**
  * index.js
  *
- * Industrial-grade refactor of the original Node.js scraper.
+ * ES Module conversion and industrial-grade refactor of the original Node.js scraper.
  *
- * Features & improvements:
- * - Granular error handling around Puppeteer operations with retry/backoff helper.
- * - Fast selectors with conservative timeouts to keep within CI 10-minute limit.
- * - Firestore batch writes to minimize network overhead and ensure atomic commits.
- * - Robust date extraction that strips any time component and preserves human-readable
- *   month/day formats where possible, otherwise standardizes to YYYY-MM-DD.
- * - Clear logging (console.info / console.warn / console.error).
- * - Telegram notifications for fatal errors or important summaries.
- * - Safe Firebase initialization using either a JSON string in env or a file path.
- * - Graceful shutdown and resource cleanup.
+ * Changes in this version:
+ * - Converted all require(...) calls to ES Module import syntax to match "type": "module".
+ * - Replaced dynamic require(...) JSON loading with fs-based reads (compatible with ESM).
+ * - Preserved the robust error handling, retries, Firestore batching, and date-only extraction logic.
  *
- * Required environment variables:
- * - SCRAPE_URL               (the page to scrape)
- * - PUPPETEER_HEADLESS      (optional, default "true")
+ * Environment variables (same as before):
+ * - SCRAPE_URL
+ * - PUPPETEER_HEADLESS (optional, default "true")
  * - FIREBASE_SERVICE_ACCOUNT (JSON string) OR FIREBASE_SERVICE_ACCOUNT_PATH (path to json file)
  * - FIREBASE_PROJECT_ID
- * - TELEGRAM_BOT_TOKEN      (optional, to send notifications)
- * - TELEGRAM_CHAT_ID        (optional)
+ * - TELEGRAM_BOT_TOKEN (optional)
+ * - TELEGRAM_CHAT_ID (optional)
  *
- * Note: Adjust selectors and extraction logic below to match the site being scraped.
+ * Note: Adjust selectors via env vars LIST_CONTAINER_SELECTOR and ITEM_ROW_SELECTOR as required.
  */
 
-const puppeteer = require('puppeteer');
-const admin = require('firebase-admin');
-const crypto = require('crypto');
-const fetch = require('node-fetch');
+import puppeteer from 'puppeteer';
+import admin from 'firebase-admin';
+import crypto from 'crypto';
+import fetch from 'node-fetch';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-const DEFAULT_SELECTOR_TIMEOUT = 8_000; // ms - keep small so overall run is fast
+const __filename = fileURLToPath(import.meta.url);
+
+const DEFAULT_SELECTOR_TIMEOUT = 8_000; // ms
 const RETRY_ATTEMPTS = 3;
 const RETRY_BASE_DELAY = 500; // ms
 
@@ -42,6 +41,7 @@ const error = (...args) => console.error(new Date().toISOString(), '[ERROR]', ..
 /* ----------------------------- Initialization ----------------------------- */
 
 function initFirebase() {
+  // If already initialized, return app
   if (admin.apps && admin.apps.length) {
     return admin.app();
   }
@@ -59,11 +59,20 @@ function initFirebase() {
       throw new Error('FIREBASE_SERVICE_ACCOUNT is not valid JSON.');
     }
   } else if (process.env.FIREBASE_SERVICE_ACCOUNT_PATH) {
-    // load from path
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
-    serviceAccount = require(process.env.FIREBASE_SERVICE_ACCOUNT_PATH);
+    // Read JSON credentials from provided path
+    const providedPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
+    // Resolve relative paths against cwd
+    const resolved = path.isAbsolute(providedPath)
+      ? providedPath
+      : path.resolve(process.cwd(), providedPath);
+    try {
+      const raw = fs.readFileSync(resolved, 'utf8');
+      serviceAccount = JSON.parse(raw);
+    } catch (err) {
+      throw new Error(`Failed loading service account JSON from path "${resolved}": ${err.message}`);
+    }
   } else {
-    throw new Error('Either FIREBASE_SERVICE_ACCOUNT or FIREBASE_SERVICE_ACCOUNT_PATH must be provided.');
+    throw new Error('Either FIREBASE_SERVICE_ACCOUNT (JSON string) or FIREBASE_SERVICE_ACCOUNT_PATH must be provided.');
   }
 
   admin.initializeApp({
@@ -89,8 +98,6 @@ async function sendTelegramMessage(text) {
       method: 'POST',
       body: JSON.stringify({ chat_id: chatId, text }),
       headers: { 'Content-Type': 'application/json' },
-      // keep short timeout - don't let notif block the scraper
-      // Note: node-fetch doesn't have built-in timeout in v2; rely on Github Action network constraints
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -107,13 +114,11 @@ async function sendTelegramMessage(text) {
 
 /**
  * Sleep for ms milliseconds.
- * Non-blocking.
  */
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Retry wrapper with exponential backoff for async functions.
- * Attempts fn up to attempts times with baseDelay * 2^(i) backoff.
  */
 async function retry(fn, { attempts = RETRY_ATTEMPTS, baseDelay = RETRY_BASE_DELAY, onRetry } = {}) {
   let i = 0;
@@ -132,7 +137,6 @@ async function retry(fn, { attempts = RETRY_ATTEMPTS, baseDelay = RETRY_BASE_DEL
 
 /**
  * Wait for selector with small timeout and automatic retries.
- * Returns the ElementHandle or throws.
  */
 async function waitForSelectorWithRetries(page, selector, opts = {}) {
   const timeout = opts.timeout ?? DEFAULT_SELECTOR_TIMEOUT;
@@ -140,7 +144,6 @@ async function waitForSelectorWithRetries(page, selector, opts = {}) {
 
   return retry(
     async () => {
-      // Use page.waitForSelector with explicit small timeout
       const el = await page.waitForSelector(selector, { timeout });
       if (!el) throw new Error(`Selector "${selector}" not found`);
       return el;
@@ -159,24 +162,19 @@ async function waitForSelectorWithRetries(page, selector, opts = {}) {
 /**
  * Given a raw text extracted from the "green row" date element, return a date-only string.
  *
- * Rules:
- * - Remove any explicit time components (e.g., "12:30 PM", "12:30", "12:30:00", "at 12:30pm").
- * - Remove timezone abbreviations ("EST", "GMT", "UTC+1", etc).
- * - If the remaining text clearly contains a month name and day (e.g., "Dec 20, 2025"), preserve that.
- * - If the text is relative ("today", "yesterday"), convert to YYYY-MM-DD.
- * - If no clear human-readable format is preserved, standardize to YYYY-MM-DD.
+ * Returns either a preserved human-readable month format (e.g., "Dec 20, 2025"),
+ * or an ISO date "YYYY-MM-DD". Returns null if no reliable date can be extracted.
  */
 function extractDateOnly(rawText, now = new Date()) {
   if (!rawText || typeof rawText !== 'string') return null;
   let s = rawText.trim();
 
-  // Normalize common words
+  // Normalize whitespace
   s = s.replace(/\s+/g, ' ');
 
-  // Lowercase temporary for checks
   const lowered = s.toLowerCase();
 
-  // Handle "today" and "yesterday" (and variants)
+  // Handle relative terms
   if (/\btoday\b/.test(lowered)) {
     return formatDateISO(new Date(now.getFullYear(), now.getMonth(), now.getDate()));
   }
@@ -186,45 +184,40 @@ function extractDateOnly(rawText, now = new Date()) {
     return formatDateISO(new Date(d.getFullYear(), d.getMonth(), d.getDate()));
   }
 
-  // Remove 'at' before time, e.g., "Dec 20, 2025 at 12:30 PM"
+  // Remove 'at' before time
   s = s.replace(/\bat\s+/i, ' ');
 
-  // Remove timezone indicators like "EST", "PST", "GMT+1", "UTC", "(GMT)", "IST", "CET"
-  s = s.replace(/\b(?:[A-Z]{2,5}|GMT[+-]?\d{1,2}|UTC[+-]?\d{1,2}|[A-Z]{1,4} ?GMT)\b/gi, '');
+  // Remove timezone indicators like "EST", "PST", "GMT+1", "UTC", etc.
+  s = s.replace(/\b(?:[A-Z]{2,5}|GMT[+\-]?\d{1,2}|UTC[+\-]?\d{1,2}|[A-Z]{1,4} ?GMT)\b/gi, '');
 
-  // Remove time components: 12:30, 12:30:00, 12:30 PM, 12:30AM, 23:59, etc.
+  // Remove time components: "12:30", "12:30:00", "12:30 PM", "12 PM"
   s = s.replace(/\b\d{1,2}:\d{2}(?::\d{2})?\s?(?:am|pm|AM|PM)?\b/g, '');
-  // Remove standalone times like "12 PM" or "5am"
   s = s.replace(/\b\d{1,2}\s?(?:am|pm)\b/gi, '');
-  // Remove 24-hour times like "2300hrs" or "2300"
   s = s.replace(/\b\d{3,4}hrs?\b/gi, '').replace(/\b\d{2}:\d{2}:\d{2}\b/g, '');
 
-  // Common connectors that may remain (commas, 'posted', 'on')
+  // Clean connectors and bullets
   s = s.replace(/\b(posted|posted on|posted:)\b/gi, '');
   s = s.replace(/[|–—•]/g, ' ');
 
   // Collapse whitespace & trim
   s = s.replace(/\s+/g, ' ').trim();
 
-  // If string contains month names or abbreviations, preserve human readable format
+  // If string contains month names, preserve the human readable format (sans time)
   const monthPattern = /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i;
   if (monthPattern.test(s)) {
-    // Some sites include extra separators like "Dec 20, 2025," - clean trailing commas
     const human = s.replace(/,\s*$/, '').trim();
-    // Ensure we removed all time pieces -- double-check there's no digits with colon
     if (!/:\d{2}/.test(human)) {
       return human;
     }
   }
 
-  // Try to parse remaining string as a date - if parseable, return YYYY-MM-DD
-  // Accept formats like "2025-12-20", "12/20/2025", "20 Dec 2025"
+  // Try parse as a date
   const parsedDate = parseFlexibleDate(s);
   if (parsedDate) {
     return formatDateISO(parsedDate);
   }
 
-  // As a last resort, if we still have a compact date-like token (e.g., "12/20"), try to interpret as mm/dd with current year
+  // Fallback for mm/dd or mm-dd (with optional year)
   const mmdd = s.match(/\b(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?\b/);
   if (mmdd) {
     const month = parseInt(mmdd[1], 10);
@@ -235,21 +228,16 @@ function extractDateOnly(rawText, now = new Date()) {
     }
   }
 
-  // If nothing else, return null indicating we couldn't reliably extract a date-only string.
+  // Unable to extract a reliable date-only string
   return null;
 }
 
-/**
- * Try parsing flexible human-readable dates using built-in Date parsing and some fallbacks.
- * Returns Date object or null.
- */
 function parseFlexibleDate(text) {
   if (!text || typeof text !== 'string') return null;
-  // Attempt direct Date parsing
   const parsed = Date.parse(text);
   if (!Number.isNaN(parsed)) return new Date(parsed);
 
-  // Try adding current year if missing and string like "Dec 20"
+  // Try appending current year if missing
   const now = new Date();
   const withYear = `${text} ${now.getFullYear()}`;
   const parsed2 = Date.parse(withYear);
@@ -258,9 +246,6 @@ function parseFlexibleDate(text) {
   return null;
 }
 
-/**
- * Format Date to YYYY-MM-DD
- */
 function formatDateISO(date) {
   if (!(date instanceof Date)) return null;
   const y = date.getFullYear();
@@ -299,12 +284,15 @@ async function runScraper() {
     });
 
     const page = await browser.newPage();
-    // Keep default navigation timeout reasonable
     page.setDefaultNavigationTimeout(60_000);
 
     info('Navigating to', scrapeUrl);
     await retry(
-      () => page.goto(scrapeUrl, { waitUntil: ['domcontentloaded', 'networkidle2'], timeout: 60_000 }),
+      () =>
+        page.goto(scrapeUrl, {
+          waitUntil: ['domcontentloaded', 'networkidle2'],
+          timeout: 60_000,
+        }),
       {
         attempts: 3,
         baseDelay: 1000,
@@ -312,7 +300,6 @@ async function runScraper() {
       }
     );
 
-    // Example: Wait for the main list container - adjust selector to your page.
     const listContainerSelector = process.env.LIST_CONTAINER_SELECTOR || '.job-listing, .results, #results';
     let containerHandle;
     try {
@@ -321,20 +308,15 @@ async function runScraper() {
       warn(`List container not found with default selector (${listContainerSelector}). Will proceed, attempting best-effort scraping.`);
     }
 
-    // Extract job entries from the page using a page.evaluate to avoid round-trips.
-    // The actual selectors below should be adjusted to the site being scraped.
     const jobs = await page.$$eval(
-      // Candidate row selector - try multiple options, fallback to 'article' or 'tr'
       process.env.ITEM_ROW_SELECTOR || '.job-row, .listing, article, tr',
       (nodes) => {
         const results = [];
         for (const node of nodes) {
           try {
-            // Attempt to extract common fields; each selector attempt should be tolerant
             const titleEl = node.querySelector('.title, .job-title, h2, a') || null;
             const companyEl = node.querySelector('.company, .employer') || null;
             const locationEl = node.querySelector('.location') || null;
-            // The "green row" date element may be marked with a class like 'date', 'posted', or have style
             const dateEl = node.querySelector('.date, .posted, .post-date, .green-row') || null;
             const linkEl = node.querySelector('a[href]') || null;
 
@@ -344,11 +326,10 @@ async function runScraper() {
             const rawDate = dateEl ? dateEl.innerText.trim() : null;
             const url = linkEl ? linkEl.href : null;
 
-            // Generate an id candidate - prefer an attribute if present
             const idAttr = node.getAttribute('data-id') || node.id || url || (title ? title.slice(0, 80) : null);
             results.push({ title, company, location, rawDate, url, idAttr });
           } catch (e) {
-            // Ignore nodes that fail extraction
+            // ignore bad node
           }
         }
         return results;
@@ -357,30 +338,25 @@ async function runScraper() {
 
     info(`Scraped ${jobs.length} job entries from the page.`);
 
-    // Normalize jobs and remove duplicates
+    // Normalize jobs and dedupe
     const normalized = [];
     const seen = new Set();
     for (const item of jobs) {
-      // Basic validation
       if (!item.title && !item.company) continue;
-
-      // Create deterministic ID from url or idAttr or hashed title+company
       const idSource = item.url || item.idAttr || `${item.title || ''}::${item.company || ''}`;
       const id = crypto.createHash('sha256').update(idSource).digest('hex');
 
       if (seen.has(id)) continue;
       seen.add(id);
 
-      // Fix date - remove any time component
       const dateOnly = extractDateOnly(item.rawDate);
-      // If we couldn't extract any date, leave null to avoid inserting incorrect times
       const job = {
         id,
         title: item.title || null,
         company: item.company || null,
         location: item.location || null,
         rawDate: item.rawDate || null,
-        date: dateOnly, // dateOnly is either human-readable like "Dec 20, 2025" or YYYY-MM-DD or null
+        date: dateOnly, // either human-readable like "Dec 20, 2025" or ISO YYYY-MM-DD or null
         url: item.url || null,
       };
       normalized.push(job);
@@ -388,7 +364,7 @@ async function runScraper() {
 
     info(`Normalized ${normalized.length} unique job entries.`);
 
-    // Firestore batch writes - commit in chunks of 400 (safely under 500 limit)
+    // Firestore batch writes
     const BATCH_MAX = 400;
     const batches = [];
     for (let i = 0; i < normalized.length; i += BATCH_MAX) {
@@ -400,7 +376,6 @@ async function runScraper() {
       const batch = db.batch();
       for (const job of chunk) {
         const docRef = db.collection('jobs').doc(job.id);
-        // Only write the fields we want. Use merge:true to avoid overwriting unrelated metadata.
         batch.set(
           docRef,
           {
@@ -417,7 +392,6 @@ async function runScraper() {
         totalWrites += 1;
       }
 
-      // Commit with retry
       await retry(
         () => batch.commit(),
         {
@@ -434,7 +408,6 @@ async function runScraper() {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     info(`Scraping finished in ${elapsed} seconds.`);
 
-    // Optionally send a summary Telegram message on success
     if (process.env.SEND_SUMMARY !== 'false') {
       sendTelegramMessage(`Scraper finished successfully. ${normalized.length} jobs processed. Duration: ${elapsed}s.`);
     }
@@ -442,7 +415,6 @@ async function runScraper() {
     return { success: true, processed: normalized.length };
   } catch (err) {
     error('Fatal error during scraping:', err && err.stack ? err.stack : err);
-    // Send a critical Telegram notification
     try {
       await sendTelegramMessage(`Scraper failed: ${err.message || err}`);
     } catch (notifErr) {
@@ -463,10 +435,8 @@ async function runScraper() {
 
 /* ----------------------------- Safety hooks ----------------------------- */
 
-// Global handlers to prevent process crashes without cleanup
 process.on('unhandledRejection', (reason) => {
   error('Unhandled Rejection:', reason && reason.stack ? reason.stack : reason);
-  // Attempt to notify then exit
   sendTelegramMessage(`Scraper unhandledRejection: ${reason && reason.message ? reason.message : reason}`).finally(() =>
     process.exit(1)
   );
@@ -481,7 +451,7 @@ process.on('uncaughtException', (err) => {
 
 /* ----------------------------- Entrypoint ----------------------------- */
 
-if (require.main === module) {
+if (process.argv[1] === __filename) {
   (async () => {
     try {
       const result = await runScraper();
