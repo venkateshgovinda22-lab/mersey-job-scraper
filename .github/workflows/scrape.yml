@@ -3,8 +3,8 @@ name: Scheduled Scrape
 on:
   workflow_dispatch:
   schedule:
-    # Run hourly (example). Adjust as required.
-    - cron: '0 * * * *'
+    # # CRITICAL CHANGE: Run every 15 minutes (at the 0, 15, 30, and 45-minute mark of every hour)
+    - cron: '*/15 * * * *'
 
 jobs:
   scrape:
@@ -15,12 +15,12 @@ jobs:
     env:
       # CRITICAL FIX 1: Remapping the URL name. 
       # Your index.js checks for JOBS_PAGE_URL, so we must map your secret (SCRAPE_URL) to that name.
-      JOBS_PAGE_URL: ${{ secrets.SCRAPE_URL }} 
+      JOBS_PAGE_URL: ${{ secrets.JOBS_PAGE_URL }} 
       
       FIREBASE_CONFIG: ${{ secrets.FIREBASE_CONFIG }}
       
       # FIX 2 (Telegram Warning): The index.js code expects TELEGRAM_TOKEN, not TELEGRAM_BOT_TOKEN
-      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
       # The index.js code also expects these, even if they are empty
