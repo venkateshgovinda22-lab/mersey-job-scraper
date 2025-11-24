@@ -25,11 +25,11 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '18'
+          node-version: '20'
 
       - name: Install Dependencies
         # 'npm ci' is faster and cleaner than 'npm install' for servers
-        run: npm ci
+        run: npm install
 
       - name: Run Scraper
         env:
