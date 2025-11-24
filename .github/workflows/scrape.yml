@@ -1,42 +1,70 @@
 name: Mercy Medical Scraper
 
+# Concurrency ensures only one scraper runs at a time. 
+concurrency: 
+  group: scraper-production
+  cancel-in-progress: false
+
 on:
   schedule:
-    # 1. Monday to Friday: Every 30 minutes
-    #    From 07:00 UTC to 19:30 UTC (Buffer included for Time Changes)
-    - cron: '*/30 7-19 * * 1-5'
+    # 1. PEAK HOURS (Mon-Fri): Every 15 minutes
+    - cron: '*/15 6-21 * * 1-5'
     
-    # 2. Saturday and Sunday: 3 times a day
-    #    08:00 UTC (8am GMT / 9am BST)
-    #    14:00 UTC (2pm GMT / 3pm BST)
-    #    20:00 UTC (8pm GMT / 9pm BST)
-    - cron: '0 8,14,20 * * 6,0'
+    # 2. OFF-PEAK (Mon-Fri Nights): Every Hour
+    - cron: '0 22-5 * * 1-5'
 
-  # Allows you to click "Run workflow" manually for testing
+    # 3. WEEKENDS: Every Hour
+    - cron: '0 8-22 * * 6,0'
+
+  # Allows manual testing
   workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    
+    # CRITICAL: Hard stop after 10 minutes.
+    timeout-minutes: 10 
+
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Install Dependencies
-        # 'npm ci' is faster and cleaner than 'npm install' for servers
         run: npm install
 
       - name: Run Scraper
+        id: run_scraper_step # Give this step an ID to reference
         env:
           WEBSITE_USERNAME: ${{ secrets.WEBSITE_USERNAME }}
           WEBSITE_PASSWORD: ${{ secrets.WEBSITE_PASSWORD }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           FIREBASE_CONFIG: ${{ secrets.FIREBASE_CONFIG }}
-          JOBS_PAGE_URL: ${{ secrets.JOBS_PAGE_URL }}
-        run: node index.js
+          JOBS_PAGE_URL: ${{ secrets.JOBS_PAGE_URL }} 
+        # The '|| exit 0' prevents the overall job from failing if the script fails, 
+        # which lets the final notification step run properly.
+        run: node index.js || exit 0 
+      
+      - name: 🚨 Notify on Workflow Failure (Final Check)
+        # This step runs if the previous steps failed OR if the overall job times out.
+        # It ensures you get a notification even if index.js didn't start its own error logic.
+        if: ${{ failure() || cancelled() }}
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_TOKEN }}
+          message: |
+            ⚠️ **WORKFLOW CRITICAL FAILURE** ⚠️
+            
+            *Job:* ${{ github.workflow }}
+            *Status:* Failed/Timeout (Exceeded 10 mins)
+            *Repo:* ${{ github.repository }}
+            *Check Logs:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          disable_web_page_preview: true
