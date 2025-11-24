@@ -1,6 +1,6 @@
 name: Mercy Medical Scraper
 
-# Concurrency ensures only one scraper runs at a time. 
+# Concurrency: Prevents two scrapers from writing to the DB at the exact same time
 concurrency: 
   group: scraper-production
   cancel-in-progress: false
@@ -8,39 +8,44 @@ concurrency:
 on:
   schedule:
     # 1. PEAK HOURS (Mon-Fri): Every 15 minutes
-    #    06:00 to 21:00 UTC
+    #    06:00 UTC to 21:00 UTC
     - cron: '*/15 6-21 * * 1-5'
     
     # 2. OFF-PEAK (Mon-Fri Nights): Every Hour
-    #    GitHub Fix: Split '22-5' into two separate lines
-    - cron: '0 22-23 * * 1-5'  # 10 PM and 11 PM
-    - cron: '0 0-5 * * 1-5'    # Midnight to 5 AM
+    #    Split into two lines to avoid range errors
+    - cron: '0 22-23 * * 1-5'
+    - cron: '0 0-5 * * 1-5'
 
     # 3. WEEKENDS: Every Hour
-    #    08:00 to 22:00 UTC
+    #    08:00 UTC to 22:00 UTC
     - cron: '0 8-22 * * 6,0'
 
-  # Allows manual testing
+  # Allows you to click "Run workflow" manually for testing
   workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     
-    # CRITICAL: Hard stop after 10 minutes.
+    # CRITICAL: Hard stop after 10 minutes. 
+    # If the scraper freezes, this kills it to prevent infinite loops.
     timeout-minutes: 10 
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js with Cache
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-      
-      - name: Install Dependencies
-        run: npm install
+          # ENABLED: Speeds up runs by remembering files from previous runs
+          cache: 'npm' 
+
+      - name: Install Dependencies (CI Mode)
+        # 'npm ci' is the industrial standard for servers.
+        # It requires package-lock.json to exist.
+        run: npm ci
 
       - name: Run Scraper
         id: run_scraper_step
@@ -51,11 +56,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           FIREBASE_CONFIG: ${{ secrets.FIREBASE_CONFIG }}
           JOBS_PAGE_URL: ${{ secrets.JOBS_PAGE_URL }} 
-        # We let this step fail naturally so the next step detects it
         run: node index.js
       
       - name: 🚨 Notify on Workflow Failure
-        # This step ONLY runs if the 'Run Scraper' step failed or timed out
+        # This step ONLY runs if the scraper crashes or hits the 10-minute timeout
         if: failure() 
         uses: appleboy/telegram-action@master
         with:
